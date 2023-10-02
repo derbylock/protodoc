@@ -92,13 +92,13 @@ const ProtoTpl = `
     * [{{.MethodName}}]({{.HRef}})
 {{- end}}
 {{- end}}
-* [Enums](#enums)
-{{- range .Enums}}
-    * [Enum {{.Name}}]({{.HRef}})
-{{- end}}
 * [Типы](#objects)
 {{- range .Objects}}
     * [Тип {{.Name}}]({{.HRef}})
+{{- end}}
+* [Enums](#enums)
+{{- range .Enums}}
+    * [Enum {{.Name}}]({{.HRef}})
 {{- end}}
 {{end}}
 
