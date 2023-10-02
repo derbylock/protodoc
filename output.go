@@ -18,12 +18,12 @@ func (pf ProtoFile) outputServices() {
 		fmt.Printf("%s\n\n", s.Comment)
 
 		// list of methods
-		for _, inf := range s.Infs {
+		for _, inf := range s.Operations {
 
 			// method line
 			fmt.Printf("METHOD %s", inf.ServiceName+"."+inf.MethodName)
-			if inf.Typ != Unary {
-				fmt.Printf(" (%s)\n", inf.Typ)
+			if inf.Type != Unary {
+				fmt.Printf(" (%s)\n", inf.Type)
 			} else {
 				fmt.Printf("\n")
 			}
@@ -35,14 +35,14 @@ func (pf ProtoFile) outputServices() {
 			fmt.Printf("%s\n\n", inf.Comment)
 
 			// method request
-			fmt.Printf("REQUEST PARAMETERS (%s)\n", inf.Req.Typ)
-			for _, f := range inf.Req.Params {
+			fmt.Printf("REQUEST PARAMETERS (%s)\n", inf.Request.Type)
+			for _, f := range inf.Request.Params {
 				fmt.Printf("    %s %s %s\n", f.Type(), f.Name, f.Comment)
 			}
 
 			// method response
-			fmt.Printf("RESPONSE PARAMETERS (%s)\n", inf.Res.Typ)
-			for _, f := range inf.Res.Params {
+			fmt.Printf("RESPONSE PARAMETERS (%s)\n", inf.Response.Type)
+			for _, f := range inf.Response.Params {
 				fmt.Printf("    %s %s %s\n", f.Type(), f.Name, f.Comment)
 			}
 

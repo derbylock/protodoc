@@ -1,10 +1,17 @@
 package main
 
 import (
-	"log"
+	"fmt"
+	"go/doc/comment"
 	"strings"
 
 	"github.com/yoheimuta/go-protoparser/v4/parser"
+	"github.com/yoheimuta/go-protoparser/v4/parser/meta"
+)
+
+const (
+	XDomainExtension         = "x-domain"
+	XDomainCategoryExtension = "x-category"
 )
 
 // ProtoFile is a parsing unit
@@ -17,7 +24,7 @@ type ProtoFile struct {
 	Enums []Enum
 }
 
-// Service : a proto file could have multiple Service
+// Service is a grpc service
 type Service struct {
 	// service only use Comment placed at the beginning
 	Comment string
@@ -26,7 +33,7 @@ type Service struct {
 	// my name
 	ServiceName string
 	// a service has multiple endpoint
-	Infs []Endpoint
+	Operations []Endpoint
 }
 
 // Endpoint is also called method or interface
@@ -44,9 +51,13 @@ type Endpoint struct {
 	// Comment placed at the beginning, as well as inline-Comment placed at the ending
 	Comment string
 
-	Typ RPCType
-	Req Request
-	Res Response
+	Markdown string
+
+	Type     RPCType
+	Request  Request
+	Response Response
+
+	Extensions map[string]string
 }
 
 type RPCType int
@@ -60,20 +71,21 @@ const (
 
 type Request struct {
 	Params []Field
-	Typ    string
+	Type   string
 }
 
 type Response struct {
 	Params []Field
-	Typ    string
+	Type   string
 }
 
 type Field struct {
 	// Comment placed at the beginning, as well as inline-Comment placed at the ending
-	Comment string
-	Name    string
-	Typ     string
-	Repeat  bool
+	Comment     string
+	Name        string
+	TypeName    string
+	KeyTypeName string
+	Repeat      bool
 	// the Enclosing type name of this field
 	Enclosing string
 	// reference to the enclosing proto file
@@ -123,52 +135,143 @@ func (t RPCType) String() string {
 	return "unknown"
 }
 
-func (pf *ProtoFile) ComposeFrom(pp *parser.Proto) {
+func (pf *ProtoFile) ComposeFrom(pp *parser.Proto) error {
+	comments := make([]*parser.Comment, 0)
+	for _, x := range pp.ProtoBody {
+		if comment, ok := x.(*parser.Comment); ok {
+			comments = append(comments, comment)
+		}
+		if pack, ok := x.(*parser.Package); ok {
+			comments = append(comments, pack.Comments...)
+		}
+	}
+	_, protobufFileExtensions := composeHeadComment(comments, nil)
+
 	// find all services in proto body
 	for _, x := range pp.ProtoBody {
 		if service, ok := x.(*parser.Service); ok {
-			pf.addService(service, pp)
+			if err := pf.addService(service, pp, protobufFileExtensions); err != nil {
+				return fmt.Errorf("add service: %w", err)
+			}
 		}
 	}
 	pf.addObjectsAndEnums(pp)
+	return nil
 }
 
-func (pf *ProtoFile) addService(ps *parser.Service, pp *parser.Proto) {
+func (pf *ProtoFile) addService(
+	ps *parser.Service,
+	pp *parser.Proto,
+	protobufFileExtensions map[string]string,
+) error {
 	var s Service
-	s.Comment = composeHeadComment(ps.Comments)
+	var serviceExtensions map[string]string
+	s.Comment, serviceExtensions = composeHeadComment(ps.Comments, protobufFileExtensions)
 	s.PackageName = extractPackageName(pp)
 	s.ServiceName = ps.ServiceName
-	s.Infs = pf.composeInterfaces(s, ps, pp)
+	var err error
+	s.Operations, err = pf.composeInterfaces(s, ps, pp, serviceExtensions)
+	if err != nil {
+		return fmt.Errorf("compose interfaces: %w", err)
+	}
 
 	pf.Services = append(pf.Services, s)
+	return nil
 }
 
 func extractComment(pc *parser.Comment) string {
 	if pc == nil {
 		return ""
 	}
-	return strings.TrimSpace(strings.Join(pc.Lines(), "\n"))
+	lines := removeInitialEmptyLinesAndAsterisks(pc.Lines())
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
-func composeHeadComment(pcs []*parser.Comment) string {
+func removeInitialEmptyLinesAndAsterisks(lines []string) []string {
+	res := make([]string, 0)
+	hasNotEmpty := false
+	for _, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+		if !hasNotEmpty && (trimmedLine == "" ||
+			strings.HasPrefix(line, "* ") ||
+			trimmedLine == "*" ||
+			strings.HasPrefix(line, "*\t")) {
+			continue
+		}
+		hasNotEmpty = true
+		res = append(res, removeInitialAsterisk(line))
+	}
+	return res
+}
+
+func composeHeadComment(pcs []*parser.Comment, parentExtensions map[string]string) (string, map[string]string) {
+	extensions := make(map[string]string)
+	for k, v := range parentExtensions {
+		extensions[k] = v
+	}
 	ss := make([]string, 0, len(pcs))
 	for _, pc := range pcs {
+		if newExtensions, ok := getExtensions(pc); ok {
+			for key, val := range newExtensions {
+				extensions[key] = val
+			}
+			continue
+		}
 		s := extractComment(pc)
 		ss = append(ss, s)
 	}
-	return strings.Join(ss, " ")
+	return strings.Join(ss, "\n"), extensions
 }
 
-func composeHeadAndInlineComment(pcs []*parser.Comment, pic *parser.Comment, sep string) string {
-	head := composeHeadComment(pcs)
+func getExtensions(pc *parser.Comment) (map[string]string, bool) {
+	extensions := make(map[string]string, 0)
+	for _, line := range removeInitialEmptyLinesAndAsterisks(pc.Lines()) {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Domain:") {
+			extensions[XDomainExtension] = strings.TrimSpace(strings.TrimPrefix(line, "Domain:"))
+		}
+		if strings.HasPrefix(line, "Category:") {
+			extensions[XDomainCategoryExtension] = strings.TrimSpace(strings.TrimPrefix(line, "Category:"))
+		}
+		if strings.HasPrefix(line, XDomainExtension+":") {
+			extensions[XDomainExtension] = strings.TrimSpace(strings.TrimPrefix(line, XDomainExtension+":"))
+		}
+		if strings.HasPrefix(line, XDomainCategoryExtension+":") {
+			extensions[XDomainCategoryExtension] = strings.TrimSpace(strings.TrimPrefix(line, XDomainCategoryExtension+":"))
+		}
+	}
+	if len(extensions) > 0 {
+		return extensions, true
+	}
+	return nil, false
+}
+
+func removeInitialAsterisk(line string) string {
+	line = strings.TrimSpace(line)
+	if strings.HasPrefix(line, "* ") {
+		return strings.TrimPrefix(line, "* ")
+	}
+	if line == "*" {
+		return ""
+	}
+	return strings.TrimPrefix(line, "*\t")
+}
+
+func composeHeadAndInlineComment(
+	pcs []*parser.Comment,
+	pic *parser.Comment,
+	sep string,
+	parentExtensions map[string]string,
+) (string, map[string]string) {
+	head, extensions := composeHeadComment(pcs, parentExtensions)
 	inline := extractComment(pic)
 	if head == "" {
-		return inline
+		return inline, extensions
 	}
 	if inline == "" {
-		return head
+		return head, extensions
 	}
-	return head + sep + inline
+	return head + sep + inline, extensions
 }
 
 func extractPackageName(pp *parser.Proto) string {
@@ -180,31 +283,79 @@ func extractPackageName(pp *parser.Proto) string {
 	return "(missed-package)"
 }
 
-func (pf *ProtoFile) composeInterfaces(s Service, ps *parser.Service, pp *parser.Proto) []Endpoint {
+func (pf *ProtoFile) composeInterfaces(
+	s Service,
+	ps *parser.Service,
+	pp *parser.Proto,
+	parentExtensions map[string]string,
+) ([]Endpoint, error) {
 	eps := make([]Endpoint, 0, len(ps.ServiceBody))
 	for _, x := range ps.ServiceBody {
-		var ep Endpoint
-		ep.PackageName = s.PackageName
-		ep.ServiceName = s.ServiceName
+		var op Endpoint
+		op.PackageName = s.PackageName
+		op.ServiceName = s.ServiceName
 		if rpc, ok := x.(*parser.RPC); ok {
-			ep.MethodName = rpc.RPCName
-			ep.Comment = composeHeadAndInlineComment(rpc.Comments, rpc.InlineComment, "\n")
-			ep.Typ = extractRPCType(rpc)
-			ep.Req = extractRPCRequest(rpc.RPCRequest, pp, pf)
-			ep.Res = extractRPCResponse(rpc.RPCResponse, pp, pf)
+			op.MethodName = rpc.RPCName
+			op.Comment, op.Extensions = composeHeadAndInlineComment(rpc.Comments, rpc.InlineComment, "\n", parentExtensions)
+			op.Type = extractRPCType(rpc)
+			var err error
+			if op.Request, err = extractRPCRequest(rpc.RPCRequest, pp, pf); err != nil {
+				return nil, fmt.Errorf("extract RPC request: %w", err)
+			}
+			if op.Response, err = extractRPCResponse(rpc.RPCResponse, pp, pf); err != nil {
+				return nil, fmt.Errorf("extract RPC response: %w", err)
+			}
 		}
-		ep.validate()
-		eps = append(eps, ep)
+		op.validate()
+		eps = append(eps, op)
 	}
-	return eps
+	return eps, nil
+}
+
+func (e *Endpoint) OperationMarkdown() string {
+	return e.Markdown
 }
 
 func (e *Endpoint) validate() {
 	e.URLPath = "/" + e.PackageName + "/" + e.ServiceName + "/" + e.MethodName
 	e.HTTPMethod = "POST"
-	if e.Typ != Unary {
+	if e.Type != Unary {
 		e.HTTPMethod = "GET" // websocket uses GET
 	}
+}
+
+func (e *Endpoint) XDomainCategory() string {
+	return e.Extensions[XDomainCategoryExtension]
+}
+
+func (e *Endpoint) XDomain() string {
+	return e.Extensions[XDomainExtension]
+}
+
+func (e *Endpoint) OperationID() string {
+	return e.MethodName
+}
+
+func (e *Endpoint) FullName() string {
+	return fmt.Sprintf("%s.%s/%s", e.PackageName, e.ServiceName, e.MethodName)
+}
+
+func (e *Endpoint) Summary() *string {
+	summary := e.Comment
+	indexEOL := strings.IndexByte(summary, '\n')
+	if indexEOL > 0 {
+		summary = summary[:indexEOL]
+	}
+	return &summary
+}
+
+func (e *Endpoint) Description() *string {
+	summary := e.Comment
+	indexEOL := strings.IndexByte(summary, '\n')
+	if indexEOL > 0 {
+		summary = summary[indexEOL+1:]
+	}
+	return &summary
 }
 
 func extractRPCType(rpc *parser.RPC) RPCType {
@@ -220,28 +371,44 @@ func extractRPCType(rpc *parser.RPC) RPCType {
 	return Unary
 }
 
-func extractRPCRequest(rr *parser.RPCRequest, pp *parser.Proto, pf *ProtoFile) (r Request) {
-	msg := findMessage(pp, rr.MessageType)
+func extractRPCRequest(rr *parser.RPCRequest, pp *parser.Proto, pf *ProtoFile) (r Request, err error) {
+	msg, err := findMessage(pp, rr.MessageType)
+	if err != nil {
+		return r, fmt.Errorf("find message: %w", err)
+	}
 	r.Params = composeFields(msg, msg.MessageName, pf)
-	r.Typ = rr.MessageType
-	return r
+	r.Type = rr.MessageType
+	return r, nil
 }
 
-func extractRPCResponse(rr *parser.RPCResponse, pp *parser.Proto, pf *ProtoFile) (r Response) {
-	msg := findMessage(pp, rr.MessageType)
+func extractRPCResponse(rr *parser.RPCResponse, pp *parser.Proto, pf *ProtoFile) (r Response, err error) {
+	msg, err := findMessage(pp, rr.MessageType)
+	if err != nil {
+		return r, fmt.Errorf("find message: %w", err)
+	}
 	r.Params = composeFields(msg, msg.MessageName, pf)
-	r.Typ = rr.MessageType
-	return r
+	r.Type = rr.MessageType
+	return r, nil
 }
 
-func findMessage(pp *parser.Proto, mt string) *parser.Message {
+func findMessage(pp *parser.Proto, mt string) (*parser.Message, error) {
 	for _, x := range pp.ProtoBody {
 		if m, ok := x.(*parser.Message); ok && m.MessageName == mt {
-			return m
+			return m, nil
 		}
 	}
-	log.Panicf("proto doesn't has message %q", mt)
-	return nil
+	if mt == "google.protobuf.Empty" {
+		return &parser.Message{
+			MessageName:                  "google.protobuf.Empty",
+			MessageBody:                  nil,
+			Comments:                     nil,
+			InlineComment:                nil,
+			InlineCommentBehindLeftCurly: nil,
+			Meta:                         meta.Meta{},
+		}, nil
+	}
+
+	return nil, fmt.Errorf("proto doesn't has message %q", mt)
 }
 
 func composeFields(pm *parser.Message, enclosing string, protoFile *ProtoFile) []Field {
@@ -249,10 +416,21 @@ func composeFields(pm *parser.Message, enclosing string, protoFile *ProtoFile) [
 	for _, x := range pm.MessageBody {
 		if pf, ok := x.(*parser.Field); ok {
 			var f Field
-			f.Comment = composeHeadAndInlineComment(pf.Comments, pf.InlineComment, " ")
+			f.Comment, _ = composeHeadAndInlineComment(pf.Comments, pf.InlineComment, " ", nil)
 			f.Name = pf.FieldName
-			f.Typ = pf.Type
+			f.TypeName = pf.Type
 			f.Repeat = pf.IsRepeated
+			f.Enclosing = enclosing
+			f.protoFile = protoFile
+			fs = append(fs, f)
+		}
+		if pf, ok := x.(*parser.MapField); ok {
+			var f Field
+			f.Comment, _ = composeHeadAndInlineComment(pf.Comments, pf.InlineComment, " ", nil)
+			f.Name = pf.MapName
+			f.TypeName = pf.Type
+			f.KeyTypeName = pf.KeyType
+			f.Repeat = false
 			f.Enclosing = enclosing
 			f.protoFile = protoFile
 			fs = append(fs, f)
@@ -280,17 +458,23 @@ var scalarTypes = map[string]struct{}{
 }
 
 func (f Field) isScalar() (typename string, ok bool) {
-	_, ok = scalarTypes[f.Typ]
-	return f.Typ, ok
+	if f.KeyTypeName != "" {
+		return "", false
+	}
+	_, ok = scalarTypes[f.TypeName]
+	return f.TypeName, ok
 }
 
 func (f Field) isEnum() (typename string, ok bool) {
+	if f.KeyTypeName != "" {
+		return "", false
+	}
 	scopes := strings.Split(f.Enclosing, ".")
 	for i := len(scopes); i >= 0; i-- {
 		scope := strings.Join(scopes[:i], ".")
-		qualified := f.Typ
+		qualified := f.TypeName
 		if scope != "" {
-			qualified = scope + "." + f.Typ
+			qualified = scope + "." + f.TypeName
 		}
 		for _, e := range f.protoFile.Enums {
 			if qualified == e.Name {
@@ -302,12 +486,15 @@ func (f Field) isEnum() (typename string, ok bool) {
 }
 
 func (f Field) isObject() (typename string, ok bool) {
+	if f.KeyTypeName != "" {
+		return "", false
+	}
 	scopes := strings.Split(f.Enclosing, ".")
 	for i := len(scopes); i >= 0; i-- {
 		scope := strings.Join(scopes[:i], ".")
-		qualified := f.Typ
+		qualified := f.TypeName
 		if scope != "" {
-			qualified = scope + "." + f.Typ
+			qualified = scope + "." + f.TypeName
 		}
 		for _, o := range f.protoFile.Objects {
 			if qualified == o.Name {
@@ -318,24 +505,61 @@ func (f Field) isObject() (typename string, ok bool) {
 	return "", false
 }
 
+func (f Field) isMap() (typeNameKey string, typeNameValue string, ok bool) {
+	if f.KeyTypeName == "" {
+		return "", "", false
+	}
+	scopes := strings.Split(f.Enclosing, ".")
+	for i := len(scopes); i >= 0; i-- {
+		scope := strings.Join(scopes[:i], ".")
+		var ok bool
+		if typeNameKey, ok = f.findQualified(scope, f.KeyTypeName); ok {
+			if typeNameValue, ok = f.findQualified(scope, f.TypeName); ok {
+				return typeNameKey, typeNameValue, true
+			}
+		}
+	}
+	return f.KeyTypeName, f.TypeName, true
+}
+
+func (f Field) findQualified(scope string, qualified string) (string, bool) {
+	if scope != "" {
+		qualified = scope + "." + qualified
+	}
+	for _, o := range f.protoFile.Objects {
+		if qualified == o.Name {
+			return qualified, true
+		}
+	}
+	return "", false
+}
+
 // Type resolves f's type to a readable format in the scope of protoFile
 func (f Field) Type() (r string) {
-	if f.Typ == "" {
+	if f.TypeName == "" {
 		return "(nil)"
 	}
-	if typename, ok := f.isScalar(); ok {
-		r = typename
-	} else if typename, ok := f.isEnum(); ok {
-		r = "enum " + typename
-	} else if typename, ok := f.isObject(); ok {
-		r = "object " + typename
-	} else {
-		r = "(" + f.Typ + ")"
-	}
+	r = f.TypeBase()
 	if f.Repeat {
-		r = "array of " + r
+		r = "[]" + r
 	}
 	return r
+}
+
+func (f Field) TypeBase() string {
+	if typeName, ok := f.isScalar(); ok {
+		return typeName
+	}
+	if typeNameEnum, ok := f.isEnum(); ok {
+		return "enum " + typeNameEnum
+	}
+	if typeNameObject, ok := f.isObject(); ok {
+		return "message " + typeNameObject
+	}
+	if typeNameKeyObject, typeNameValueObject, ok := f.isMap(); ok {
+		return "map <" + typeNameKeyObject + ", " + typeNameValueObject + ">"
+	}
+	return "(" + f.TypeName + ")"
 }
 
 // convert typename to href id
@@ -343,33 +567,13 @@ func href(typename string) string {
 	return strings.Join(strings.Split(strings.ToLower(typename), "."), "")
 }
 
-// TypeHRef is Type in addition to a href
-func (f Field) TypeHRef() (r string) {
-	if f.Typ == "" {
-		return "(nil)"
-	}
-	if typename, ok := f.isScalar(); ok {
-		r = typename
-	} else if typename, ok := f.isEnum(); ok {
-		r = "[enum " + typename + "](#enum-" + href(typename) + ")"
-	} else if typename, ok := f.isObject(); ok {
-		r = "[object " + typename + "](#object-" + href(typename) + ")"
-	} else {
-		r = "(" + f.Typ + ")"
-	}
-	if f.Repeat {
-		r = "array of " + r
-	}
-	return r
-}
-
 // add all messages and enums in the proto, but exclude the messages used directly by interfaces
 func (pf *ProtoFile) addObjectsAndEnums(pp *parser.Proto) {
 	excludes := make(map[string]bool)
 	for _, s := range pf.Services {
-		for _, inf := range s.Infs {
-			excludes[inf.Req.Typ] = true
-			excludes[inf.Res.Typ] = true
+		for _, op := range s.Operations {
+			excludes[op.Request.Type] = true
+			excludes[op.Response.Type] = true
 		}
 	}
 
@@ -381,10 +585,11 @@ func (pf *ProtoFile) addObjectsAndEnums(pp *parser.Proto) {
 				pf.Enums = append(pf.Enums, e)
 			} else if msg, ok := x.(*parser.Message); ok {
 				o := composeObject(msg, enclosingName, pf)
-				if excludes[o.Name] {
-					continue
+				if !excludes[o.Name] {
+					pf.Objects = append(pf.Objects, o)
+					// continue
 				}
-				pf.Objects = append(pf.Objects, o)
+
 				extractMessagesAndEnums(msg.MessageBody, enclosingName+msg.MessageName+".")
 			}
 		}
@@ -395,7 +600,7 @@ func (pf *ProtoFile) addObjectsAndEnums(pp *parser.Proto) {
 
 func composeObject(pm *parser.Message, enclosingName string, pf *ProtoFile) (o Object) {
 	enclosingName = enclosingName[1:] // trim the first "."
-	o.Comment = composeHeadComment(pm.Comments)
+	o.Comment, _ = composeHeadComment(pm.Comments, nil)
 	o.Name = enclosingName + pm.MessageName
 	o.Attrs = composeFields(pm, o.Name, pf)
 	return o
@@ -403,7 +608,7 @@ func composeObject(pm *parser.Message, enclosingName string, pf *ProtoFile) (o O
 
 func composeEnum(pe *parser.Enum, enclosingName string) (e Enum) {
 	enclosingName = enclosingName[1:] // trim the first "."
-	e.Comment = composeHeadComment(pe.Comments)
+	e.Comment, _ = composeHeadComment(pe.Comments, nil)
 	e.Name = enclosingName + pe.EnumName
 	e.Constants = composeEnumFields(pe, e.Name)
 	return e
@@ -414,7 +619,7 @@ func composeEnumFields(pe *parser.Enum, enclosing string) []EnumField {
 	for _, x := range pe.EnumBody {
 		if pf, ok := x.(*parser.EnumField); ok {
 			var f EnumField
-			f.Comment = composeHeadAndInlineComment(pf.Comments, pf.InlineComment, " ")
+			f.Comment, _ = composeHeadAndInlineComment(pf.Comments, pf.InlineComment, " ", nil)
 			f.Name = pf.Ident
 			f.Val = pf.Number
 			f.Enclosing = enclosing
@@ -422,4 +627,78 @@ func composeEnumFields(pe *parser.Enum, enclosing string) []EnumField {
 		}
 	}
 	return fs
+}
+
+func (e *Endpoint) EmptySummary() bool {
+	summary := e.Summary()
+	return summary == nil || strings.TrimSpace(*summary) == ""
+}
+
+func (e *Endpoint) DescriptionMarkdown() string {
+	description := e.Description()
+	if description == nil {
+		return ""
+	}
+	var p comment.Parser
+	doc := p.Parse(*description)
+	var pr comment.Printer
+	docBytes := pr.Markdown(doc)
+	return string(docBytes)
+}
+
+func (e *Endpoint) Typei18n() string {
+	typeStr := `**Unary RPCs** (*клиент делает запрос на сервер в виде` +
+		` одного сообщения и получает ответ в виде одного сообщения от сервера*)`
+	switch e.Type {
+	case ClientStreaming:
+		typeStr = `**ClientStreaming RPCs** (*клиент делает запрос на сервер` +
+			` в виде последовательности сообщений и получает ответ в виде одного сообщения от сервера*)`
+	case ServerStreaming:
+		typeStr = `**ServerStreaming RPCs** (*клиент делает запрос на сервер` +
+			` в виде одного сообщения и получает ответ в виде последовательности сообщений от сервера*)`
+	case BidirectionalStreaming:
+		typeStr = `**BidirectionalStreaming RPCs** (*клиент делает запрос на сервер` +
+			` в виде последовательности сообщений и получает ответ в виде последовательности сообщений от сервера*)`
+	}
+	return typeStr
+}
+
+// TypeHRef is Type in addition to a href
+func (f Field) TypeHRef() (r string) {
+	if f.TypeName == "" {
+		return "(nil)"
+	}
+	r = f.typeHRefBase()
+	if f.Repeat {
+		r = "[]" + r
+	}
+	return r
+}
+
+func (f Field) typeHRefBase() string {
+	if typeName, ok := f.isScalar(); ok {
+		return typeName
+	}
+
+	if typeNameEnum, ok := f.isEnum(); ok {
+		return "[enum " + typeNameEnum + "](#enum-" + href(typeNameEnum) + ")"
+	}
+
+	if typeNameObject, ok := f.isObject(); ok {
+		return "[" + typeNameObject + "](#тип-" + href(typeNameObject) + ")"
+	}
+
+	if typeNameKeyObject, typeNameValueObject, ok := f.isMap(); ok {
+		keyTypeString := typeNameKeyObject
+		if _, ok := scalarTypes[typeNameKeyObject]; !ok {
+			keyTypeString = "[" + typeNameKeyObject + "](#тип-" + href(typeNameKeyObject) + ")"
+		}
+		valueTypeString := typeNameValueObject
+		if _, ok := scalarTypes[typeNameValueObject]; !ok {
+			valueTypeString = "[" + typeNameValueObject + "](#тип-" + href(typeNameValueObject) + ")"
+		}
+		return "map<" + keyTypeString + ", " + valueTypeString + ">"
+	}
+
+	return "(" + f.TypeName + ")"
 }

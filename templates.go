@@ -9,43 +9,51 @@ import (
 
 const ProtoTpl = `
 {{- /* ------------------------------------------------------------- */ -}}
-
 {{define "service"}}
-## Service {{.ServiceName}}
+## Сервис {{.ServiceName}}
 
 {{.Comment}}
-{{range .Infs}}
-### Method {{.ServiceName}}.{{.MethodName}}
-{{if .IsWebSocket}}
-WebSocket {{.Typ}}
+{{range .Operations}}
+{{template "operation" .}}
 {{end}}
-> {{.HTTPMethod}} {{.URLPath}} <br/>
-{{- if not .IsWebSocket}}
-> Content-Type: application/json <br/>
-> Authorization: Bearer (token) <br/>
+{{end}}
+
+{{- /* ------------------------------------------------------------- */ -}}
+{{define "operation"}}
+# {{.FullName}}
+[[^]](#описание-api)
+
+
+{{- if not .EmptySummary}}
+{{.Summary}}
 {{- end}}
 
-{{.Comment}}
+**Тип:** {{.Typei18n}}
 
-{{if .Req.Empty}}Request is empty
-{{else}}Request parameters
-{{template "fields" .Req.Params}}{{end}}
-{{if .Res.Empty}}Response is empty
-{{else}}Response parameters
-{{template "fields" .Res.Params}}{{end}}
-{{end}}
+
+{{.DescriptionMarkdown}}
+
+{{if .Request.Empty}}Запрос не содержит параметров
+{{else}}Параметры запроса:
+{{template "fields" .Request.Params}}{{end}}
+{{if .Response.Empty}}Ответ не содержит данных
+{{else}}Параметры ответа:
+{{template "fields" .Response.Params}}{{end}}
+
+
 {{end}}
 
 {{- /* ------------------------------------------------------------- */ -}}
 
 {{define "enum"}}
-### enum {{.Name}}
+### Enum {{.Name}}
+[[^]](#описание-api)
 
 {{.Comment}}
 
-Constants
+Константы
 
-|   Value   |   Name    |  Description |
+|   Значение   |   Наименование    |  Описание |
 | --------- | --------- | ------------ |
 {{- range .Constants}}
 | {{.Val}}  | {{.Name}} | {{.Comment}} |
@@ -55,19 +63,20 @@ Constants
 {{- /* ------------------------------------------------------------- */ -}}
 
 {{- define "object"}}
-### object {{.Name}}
+### Тип {{.Name}}
+[[^]](#описание-api)
 
 {{.Comment}}
 
-{{if .Empty}}It has no attributes
-{{else}}Attributes
+{{if .Empty}}Тип не содержит аттрибутов
+{{else}}Аттрибуты:
 {{template "fields" .Attrs}}{{end}}
 {{- end}}
 
 {{- /* ------------------------------------------------------------- */ -}}
 
 {{define "fields"}}
-|   Name    |   Type    |  Description |
+|   Название    |   Тип параметра    |  Описание |
 | --------- | --------- | ------------ |
 {{- range .}}
 | {{.Name}} | {{.TypeHRef}} | {{.Comment}} |
@@ -78,42 +87,43 @@ Constants
 
 {{define "toc"}}
 {{- range .Services}}
-* [Service {{.ServiceName}}]({{.HRef}})
-{{- range .Infs}}
-    * [Method {{.ServiceName}}.{{.MethodName}}]({{.HRef}})
+* [Сервис {{.ServiceName}}]({{.HRef}})
+{{- range .Operations}}
+    * [{{.MethodName}}]({{.HRef}})
 {{- end}}
 {{- end}}
 * [Enums](#enums)
 {{- range .Enums}}
     * [Enum {{.Name}}]({{.HRef}})
 {{- end}}
-* [Objects](#objects)
+* [Типы](#objects)
 {{- range .Objects}}
-    * [Object {{.Name}}]({{.HRef}})
+    * [Тип {{.Name}}]({{.HRef}})
 {{- end}}
 {{end}}
 
 {{- /* ------------------------------------------------------------- */ -}}
 
-# API Protocol
+# Описание API
 
-Table of Contents
 {{template "toc" .}}
 
 {{range .Services}}
 {{template "service" .}}
 {{end}}
 
-## Enums
-
-{{- range .Enums}}
-{{template "enum" .}}
+{{- if .Objects}}
+## Типы
+{{- range .Objects}}
+    {{template "object" .}}
+{{- end}}
 {{- end}}
 
-## Objects
-
-{{- range .Objects}}
-{{template "object" .}}
+{{- if .Enums}}
+## Перечисления
+    {{- range .Enums}}
+        {{template "enum" .}}
+    {{- end}}
 {{- end}}
 `
 
@@ -128,15 +138,29 @@ func (pf ProtoFile) GenerateMarkdown() string {
 
 // HRef generates a cross reference ID used in markdown
 func (s Service) HRef() string {
-	return "#service-" + strings.ToLower(s.ServiceName)
+	return "#сервис-" + strings.ToLower(s.ServiceName)
+}
+
+func headerToMDLink(h string) string {
+	res := strings.ToLower(h)
+	//res = strings.ReplaceAll(res, "_", "")
+	res = strings.ReplaceAll(res, ".", "")
+	res = strings.ReplaceAll(res, ",", "")
+	res = strings.ReplaceAll(res, "-", "")
+	res = strings.ReplaceAll(res, "/", "")
+	res = strings.ReplaceAll(res, "\\", "")
+	res = strings.ReplaceAll(res, ":", "")
+	res = strings.ReplaceAll(res, ":", "")
+	res = strings.ReplaceAll(res, " ", "-")
+	return "#" + res
 }
 
 func (e Endpoint) HRef() string {
-	return "#method-" + strings.ToLower(e.ServiceName) + strings.ToLower(e.MethodName)
+	return headerToMDLink(e.FullName())
 }
 
 func (o Object) HRef() string {
-	return "#object-" + href(o.Name)
+	return "#тип-" + href(o.Name)
 }
 
 func (e Enum) HRef() string {
@@ -156,5 +180,5 @@ func (o Object) Empty() bool {
 }
 
 func (e Endpoint) IsWebSocket() bool {
-	return e.Typ != Unary
+	return e.Type != Unary
 }
